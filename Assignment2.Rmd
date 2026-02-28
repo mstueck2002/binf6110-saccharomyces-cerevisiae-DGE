@@ -1,0 +1,965 @@
+---
+title: "Assignment2"
+author: "Madelin Stueck"
+date: "2026-02-10"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Load libraries
+
+```{r}
+##Install cran packages
+#install.packages(c("RSQLite","fastqcr","dplyr","ggplot2","pheatmap","tibble","stringr"))
+
+##Install Bioconductor packages
+#BiocManager::install(c("SRAdb","DESeq2","DEGreport","tximport","Biostrings","apeglm","clusterProfiler","KEGGREST","org.Sc.sgd.db","rtracklayer"))
+
+library(RSQLite)
+library(SRAdb)
+library(fastqcr)
+library(dplyr)
+library(DESeq2)
+library(DEGreport)
+library(tximport)
+library(Biostrings)
+library(apeglm)
+library(ggplot2)
+library(pheatmap)
+library(tibble)
+library(stringr)
+library(clusterProfiler)
+library(org.Sc.sgd.db)
+library(rtracklayer)
+library(tidyr)
+library(GO.db)
+library(enrichplot)
+library(reshape2)
+```
+
+### Fetch SRA Accessions 
+
+```{r}
+#Specify SRA accessions
+sra_accs <- c(
+  "SRR10551665","SRR10551664","SRR10551663",
+  "SRR10551662","SRR10551661","SRR10551660",
+  "SRR10551659","SRR10551658","SRR10551657"
+)
+
+#Prefetch accessions
+for (r in sra_accs) {
+  system2("prefetch", r)
+}
+
+#Convert locally
+sra_files <- list.files(
+  "/Users/maddystueck/ncbi/public",
+  pattern = "\\.sra$",
+  full.names = TRUE,
+  recursive = TRUE
+)
+
+#Create fastQ directory
+dir.create("fastq", showWarnings = FALSE)
+
+```
+
+### Download Fastq Files 
+
+```{r}
+#Download fastQ
+for (f in sra_files) {
+  message("Converting ", basename(f))
+  system2(
+    "fasterq-dump",
+    args = c(
+      f,
+      "--split-files",
+      "--threads", "10",
+      "--outdir", "fastq"
+    )
+  )
+}
+
+list.files("fastq")
+table(sub("_.*", "", list.files("fastq")))
+```
+
+### FASTQC Reads Quality Check
+
+```{r}
+#Create directy of fastq files
+fq.dir <- file.path(getwd(), "fastq")
+
+#Create fastq file list 
+fq.files <- list.files(
+  fq.dir,
+  pattern = "\\.fastq$",
+  full.names = TRUE
+)
+
+#Sanity check files in list exist
+list(fq.files)
+
+#Generate fastqc reports for each read
+fastqc(
+  fq.dir = file.path(getwd(), "fastq"),
+  qc.dir = file.path(getwd(), "fastqc_results"),
+  threads = 10,
+  fastqc.path = "fastqc"
+)
+
+#Aggregate FastQC reports
+qc.dir <- file.path(getwd(), "fastqc_results")
+qc <- qc_aggregate(qc.dir)
+
+#Create data frame of fastqc metrics
+qc %>%
+  dplyr::select(sample, module, status) %>%    
+  filter(status %in% c("WARN", "FAIL")) %>%
+  arrange(sample)
+
+#Summarize module results
+sum_stats <- summary(qc)
+```
+
+### Count Data Using Salmon
+
+```{bash}
+#Build an index on reference transcriptome fasta
+/opt/anaconda3/envs/salmon/bin/salmon index \
+  -t GCA_003046745.1_ASM304674v1_rna_from_genomic.fna.gz \
+  -i salmon_index
+
+#Make output directory 
+mkdir -p salmon_output
+
+#Quantify samples 
+for fq in fastq/*.fastq
+do
+  sample=$(basename $fq .fastq)
+  /opt/anaconda3/envs/salmon/bin/salmon quant \
+    -i salmon_index \
+    -l A \
+    -r $fq \
+    -o salmon_output/${sample}_quant
+done
+
+#Sanity check
+ls *_quant/quant.sf | wc -l
+```
+
+### Load Count Data into R
+
+```{r}
+#Create sample table
+sampleTable <- data.frame(
+  Run = c(
+    "SRR10551665_1",
+    "SRR10551664_1",
+    "SRR10551663_1",
+    "SRR10551662_1",
+    "SRR10551661_1",
+    "SRR10551660_1",
+    "SRR10551659_1",
+    "SRR10551658_1",
+    "SRR10551657_1"
+  ),
+  stage = factor(c(
+    "Early_biofilm",
+    "Early_biofilm",
+    "Early_biofilm",
+    "Thin_biofilm",
+    "Thin_biofilm",
+    "Thin_biofilm",
+    "Mature_biofilm",
+    "Mature_biofilm",
+    "Mature_biofilm"
+  ))
+)
+
+#Import reference fasta
+ref_fasta <- readDNAStringSet("GCA_003046745.1_ASM304674v1_rna_from_genomic.fna.gz")
+
+tx_id <- sub(" .*", "", names(ref_fasta))
+gene_id <- sub(".*locus_tag=([^]]+).*", "\\1", names(ref_fasta))
+
+tx2gene <- data.frame(
+  tx = tx_id,
+  gene = gene_id,
+  stringsAsFactors = FALSE
+)
+
+#Build paths to quant.sf
+salmon_files <- file.path(
+  "salmon_output",
+  paste0(sampleTable$Run, "_quant"),
+  "quant.sf"
+)
+
+#Name files by sample
+names(salmon_files) <- sampleTable$Run
+
+# import
+txi <- tximport(salmon_files, type = "salmon", tx2gene = tx2gene)
+
+```
+
+### DeSeq2: Global Expression Assessment
+
+```{r}
+#DESeq2
+dds <- DESeqDataSetFromTximport(txi, sampleTable, ~ stage)
+dds <- DESeq(dds)
+
+#Check comparison names
+resultsNames(dds)
+
+#Variance stabilize data  
+rld <- vst(dds)
+
+#Perform PCA
+transcriptome_pca <- plotPCA(rld, intgroup = "stage", returnData = TRUE)
+transcriptome_percentVar <- round(100 * attr(transcriptome_pca, "percentVar"))
+
+#Plot PCA
+ggplot(transcriptome_pca, aes(PC1, PC2, color = stage)) +
+  geom_point(size = 4) +
+  xlab(paste0("PC1: ", transcriptome_percentVar[1], "% variance")) +
+  ylab(paste0("PC2: ", transcriptome_percentVar[2], "% variance")) +
+  coord_fixed() +
+  theme_minimal()
+
+#Get gene counts
+gene_counts <- counts(dds)
+genes_detected <- sum(rowSums(gene_counts > 0) > 0)
+genes_detected
+
+#Mean variance trend
+plotDispEsts(dds)
+```
+### Thin vs Early Expression Analysis 
+
+```{r}
+#Extract differential expression results - THIN vs EARLY
+res_thin_vs_early <- results(dds,name = "stage_Thin_biofilm_vs_Early_biofilm")
+
+#Filter significant genes
+subset(res_thin_vs_early, padj < 0.05)
+
+#Get number of sigificant genes
+sum(res_thin_vs_early$padj < 0.05 & 
+    abs(res_thin_vs_early$log2FoldChange) > 1,
+    na.rm = TRUE)
+
+#MA plot (raw fold changes)
+plotMA(res_thin_vs_early, ylim=c(-2,2))
+
+#Shrink log2 fold changes
+res_thin_vs_earlyLFC <- lfcShrink(dds, coef="stage_Thin_biofilm_vs_Early_biofilm", type="apeglm")
+
+#MA plot (shrunk fold changes)
+plotMA(res_thin_vs_earlyLFC, ylim=c(-2,2))
+
+#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot
+#exclude genes with under 2-fold change (log2FoldChange < 1)
+res_thin_vs_early_df <- as.data.frame(res_thin_vs_earlyLFC) #shrinkage estimates
+res_thin_vs_early_df$gene <- rownames(res_thin_vs_early_df) #rownames to be genes
+res_thin_vs_early_df$significant <- ifelse(res_thin_vs_early_df$padj < 0.05 & abs(res_thin_vs_early_df$log2FoldChange) > 1, #split by significance 
+ifelse(res_thin_vs_early_df$log2FoldChange > 0, "Up", "Down"), "Not Sig")
+res_thin_vs_early_df <- na.omit(res_thin_vs_early_df) #remove NA values
+
+# Here's some ggplot code for a volcano plot
+# We plot log2foldchange against -log10(adjusted p value)
+ggplot(res_thin_vs_early_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) + #make plot
+geom_point() +
+scale_color_manual(values = c("Down" = "blue", "Not Sig" = "gray", "Up" = "red")) +
+  labs(x = "Log2 Fold Change", y = "-Log10 p-value",
+  title = "Volcano Plot: Thin vs Early") +
+  theme(legend.position = "right")
+```
+### Thin vs Early Heatmap
+
+```{r}
+#Remove NA genes
+res_thin_clean <- na.omit(res_thin_vs_earlyLFC)
+
+#Top 20 most significant genes
+top_thin_genes <- head(order(res_thin_clean$padj), 20)
+thin_gene_names <- rownames(res_thin_clean)[top_thin_genes]
+
+#Variance stabilizing transform
+vsd <- vst(dds)
+
+#Extract normalized matrix
+mat_thin <- assay(vsd)[thin_gene_names, ]
+
+#Sample annotation
+rownames(sampleTable) <- sampleTable$Run
+annotation_df <- sampleTable[, "stage", drop = FALSE]
+colnames(annotation_df) <- "Biofilm Stage"
+
+#Heatmap
+pheatmap(mat_thin,
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         annotation_col = annotation_df,
+         show_rownames = TRUE,
+         show_colnames = FALSE)
+```
+
+### Mature vs Early Expression Analysis
+
+```{r}
+#Extract differential expression results - MATURE vs EARLY
+res_mature_vs_early <- results(dds,name = "stage_Mature_biofilm_vs_Early_biofilm")
+
+#Filter significant genes
+subset(res_mature_vs_early, padj < 0.05)
+
+#Get number of sigificant genes
+sum(res_mature_vs_early$padj < 0.05 & 
+    abs(res_mature_vs_early$log2FoldChange) > 1,
+    na.rm = TRUE)
+
+##MA plot (raw fold changes)
+plotMA(res_mature_vs_early, ylim=c(-2,2))
+
+#Shrink log2 fold changes
+res_mature_vs_earlyLFC <- lfcShrink(dds, coef="stage_Mature_biofilm_vs_Early_biofilm", type="apeglm")
+
+#MA plot (shrunk fold changes)
+plotMA(res_mature_vs_earlyLFC, ylim=c(-2,2))
+
+#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot
+#exclude genes with under 2-fold change (log2FoldChange < 1)
+res_mature_vs_early_df <- as.data.frame(res_mature_vs_earlyLFC) #shrinkage estimates
+res_mature_vs_early_df$gene <- rownames(res_mature_vs_early_df) #rownames to be genes
+res_mature_vs_early_df$significant <- ifelse(res_mature_vs_early_df$padj < 0.05 & abs(res_mature_vs_early_df$log2FoldChange) > 1, #split by significance 
+ifelse(res_mature_vs_early_df$log2FoldChange > 0, "Up", "Down"), "Not Sig")
+res_mature_vs_early_df <- na.omit(res_mature_vs_early_df) #remove NA values
+
+# Here's some ggplot code for a volcano plot
+# We plot log2foldchange against -log10(adjusted p value)
+ggplot(res_mature_vs_early_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) + #make plot
+geom_point() +
+scale_color_manual(values = c("Down" = "blue", "Not Sig" = "gray", "Up" = "red")) +
+  labs(x = "Log2 Fold Change", y = "-Log10 p-value",
+  title = "Volcano Plot: Mature vs Early") +
+  theme(legend.position = "right")
+```
+
+### Mature vs Early Heatmap
+
+```{r}
+#Remove NA genes
+res_mature_clean <- na.omit(res_mature_vs_earlyLFC)
+
+#Top 20 most significant genes
+top_mature_genes <- head(order(res_mature_clean$padj), 20)
+mature_gene_names <- rownames(res_mature_clean)[top_mature_genes]
+
+#Variance stabilizing transform
+vsd <- vst(dds)
+
+#Extract normalized matrix
+mat_mature <- assay(vsd)[mature_gene_names, ]
+
+#Sample annotation
+rownames(sampleTable) <- sampleTable$Run
+annotation_df <- sampleTable[, "stage", drop = FALSE]
+colnames(annotation_df) <- "Biofilm Stage"
+
+#Heatmap
+pheatmap(mat_mature,
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         annotation_col = annotation_df,
+         show_rownames = TRUE,
+         show_colnames = FALSE)
+```
+### Mature vs Thin Expression Analysis
+
+```{r}
+#Relevel so thin_biofilm is the reference for comparison
+dds$stage <- relevel(dds$stage, ref = "Thin_biofilm")
+dds <- DESeq(dds)
+resultsNames(dds)
+
+res_mature_vs_thin <- results(dds,name = "stage_Mature_biofilm_vs_Thin_biofilm")
+
+#Filter significant genes
+subset(res_mature_vs_thin, padj < 0.05)
+
+#Get number of sigificant genes
+sum(res_mature_vs_thin$padj < 0.05 & 
+    abs(res_mature_vs_thin$log2FoldChange) > 1,
+    na.rm = TRUE)
+
+##MA plot (raw fold changes)
+plotMA(res_mature_vs_thin, ylim=c(-2,2))
+
+#Shrink log2 fold changes
+res_mature_vs_thinLFC <- lfcShrink(dds, coef = "stage_Mature_biofilm_vs_Thin_biofilm", type = "apeglm")
+
+#MA plot (shrunk fold changes)
+plotMA(res_mature_vs_thinLFC, ylim=c(-2,2))
+
+#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot
+#exclude genes with under 2-fold change (log2FoldChange < 1)
+res_mature_vs_thin_df <- as.data.frame(res_mature_vs_thinLFC) #shrinkage estimates
+res_mature_vs_thin_df$gene <- rownames(res_mature_vs_thin_df) #rownames to be genes
+res_mature_vs_thin_df$significant <- ifelse(res_mature_vs_thin_df$padj < 0.05 & abs(res_mature_vs_thin_df$log2FoldChange) > 1, #split by significance 
+ifelse(res_mature_vs_thin_df$log2FoldChange > 0, "Up", "Down"), "Not Sig")
+res_mature_vs_thin_df <- na.omit(res_mature_vs_thin_df) #remove NA values
+
+# Here's some ggplot code for a volcano plot
+# We plot log2foldchange against -log10(adjusted p value)
+ggplot(res_mature_vs_thin_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) + #make plot
+geom_point() +
+scale_color_manual(values = c("Down" = "blue", "Not Sig" = "gray", "Up" = "red")) +
+  labs(x = "Log2 Fold Change", y = "-Log10 p-value",
+  title = "Volcano Plot: Mature vs Thin") +
+  theme(legend.position = "right")
+
+```
+### Mature vs Thin Heatmap
+
+```{r}
+#Remove NA genes
+res_mature_thin_clean <- na.omit(res_mature_vs_thinLFC)
+
+#Top 20 most significant genes
+top_mature_thin_genes <- head(order(res_mature_thin_clean$padj), 20)
+mature_thin_gene_names <- rownames(res_mature_thin_clean)[top_mature_thin_genes]
+
+#Variance stabilizing transform
+vsd <- vst(dds)
+
+#Extract normalized matrix
+mat_mature_thin <- assay(vsd)[mature_thin_gene_names, ]
+
+#Sample annotation
+rownames(sampleTable) <- sampleTable$Run
+annotation_df <- sampleTable[, "stage", drop = FALSE]
+colnames(annotation_df) <- "Biofilm Stage"
+
+#Heatmap
+pheatmap(mat_mature_thin,
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         annotation_col = annotation_df,
+         show_rownames = TRUE,
+         show_colnames = FALSE)
+
+```
+
+### DeSeq2: LRT Time Course Analysis
+
+```{r}
+#Likelihood ratio test
+dds_lrt <- DESeq(dds, test="LRT", reduced = ~ 1)
+
+#Extract results
+res_LRT <- results(dds_lrt)
+
+#Subset the LRT results to return genes with padj < 0.05
+sig_res_LRT <- res_LRT %>%
+               data.frame() %>%
+               rownames_to_column(var="gene") %>% 
+               as_tibble() %>% 
+               filter(padj < 0.05)
+ 
+#Get sig gene lists
+sigLRT_genes <- sig_res_LRT %>% 
+                pull(gene)
+                
+length(sigLRT_genes)
+
+#Obtain rlog values for significant genes
+rld <- vst(dds)
+rld_mat <- assay(rld)
+
+#Subset significant genes
+cluster_rlog <- rld_mat[sigLRT_genes, ]
+
+#Reorder factor levels for plotting 
+sampleTable$stage <- factor(sampleTable$stage,
+                            levels = c("Early_biofilm",
+                                       "Thin_biofilm",
+                                       "Mature_biofilm"))
+
+#Use the `degPatterns` function from the 'DEGreport' package to show gene clusters across sample groups
+clusters <- degPatterns(cluster_rlog,
+                        metadata = sampleTable,
+                        time = "stage")
+
+```
+
+### Blast Conversion to Common Yeast ORF
+
+```{bash}
+#Establish blast db
+makeblastdb -in yeast_proteins.faa -dbtype prot
+
+#Run protein blast for yeast common orthologs 
+blastp \
+  -query GCA_OO3046745.1_ASM304574vs_trasnlated_cds.faa \
+  -db yeast_proteins.faa \
+  -out yeast_matches.tsv \
+  -outfmt 6 \
+  -max_target_seqs 1 \
+  -evalue 1e-5
+```
+
+```{r}
+#Import blast mapping for reference genome orthologs
+blast_map <- read.delim("blast_output/yeast_matches.tsv", header = FALSE)
+
+colnames(blast_map) <- c(
+  "protein_id", "ORF", "identity",
+  "length", "mismatch", "gap",
+  "qstart", "qend",
+  "sstart", "send",
+  "evalue", "bitscore"
+)
+
+#Clean protein_id column
+blast_map$protein_id <- str_extract(
+    blast_map$protein_id,
+    "PTN\\d+\\.\\d+"
+)
+
+#Filter for noise 
+blast_map <- blast_map %>%
+  filter(identity > 30) %>%
+  filter(bitscore > 50)
+
+#Import reference genome protein annotations
+gff <- import("GCA_003046745.1_ASM304674v1_genomic.gff.gz")
+gff_df <- as.data.frame(gff) %>%
+  subset(gbkey == "CDS") %>%
+  dplyr::select(locus_tag, protein_id)
+
+#Merge reference genome protein annotations and blast orthologs 
+gene_map <- merge(
+    gff_df,      
+    blast_map,
+    by = "protein_id"
+)
+
+#Clean ORF column
+gene_map$ORF <- str_extract(
+    gene_map$ORF,
+    "(?<=\\|)[A-Z0-9]+(?=_YEAST)"
+)
+
+gene_map <- gene_map[c("protein_id","locus_tag","ORF")]
+colnames(gene_map) <- c("protein_id","locus_tag","GENENAME")
+
+#Map gene name ORF to yeast ORF
+orf_map <- select(
+    org.Sc.sgd.db,
+    keys = gene_map$GENENAME,
+    keytype = "GENENAME",
+    columns = "ORF"
+)
+#Remove empty rows
+orf_map_clean <- orf_map %>%
+  filter(!is.na(ORF))
+
+#Merge dataframes
+gene_orf <- merge(gene_map, orf_map_clean, by = "GENENAME", all.x=FALSE)
+
+#Remove duplicate locus IDs
+gene_orf_clean <- gene_orf %>%
+  distinct(locus_tag, .keep_all = TRUE)
+
+```
+
+
+### Cluster-based Functional Enrichment
+
+```{r}
+#Build clusters data frame
+clusters_df <- clusters$df
+colnames(clusters_df) <- c("locus_tag", "cluster")
+
+cluster_orfs <- merge(
+    gene_orf_clean,
+    clusters_df,
+    by = "locus_tag"
+)
+
+#Keep clean columns
+cluster_orfs <- cluster_orfs %>%
+  dplyr::select(ORF, cluster)
+
+#Remove any duplicates 
+cluster_orfs <- cluster_orfs %>%
+  distinct(ORF, cluster)
+
+#Define Gene Universe
+gene_universe <- unique(cluster_orfs$ORF)
+
+
+#GO enrichment by cluster
+go_compare <- compareCluster(
+    ORF ~ cluster,
+    data = cluster_orfs,
+    fun = "enrichGO",
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe,
+    ont = "BP",
+)
+
+#KEGG enrichment by cluster 
+kegg_compare <- compareCluster(
+    ORF ~ cluster,
+    data = cluster_orfs,
+    fun = "enrichKEGG",
+    organism = "sce",
+    universe = gene_universe
+)
+
+#Plot
+dotplot(go_compare, showCategory = 10) +
+  ggtitle("GO-BP Enrichment by Cluster")
+
+dotplot(kegg_compare, showCategory = 10) +
+  ggtitle("KEGG Pathway Enrichment by Cluster")
+```
+
+### Thin vs Early Functional enrichment
+
+```{r}
+#Get common yeast ORF names for Early vs Thin genes
+orf_thin_vs_early <- res_thin_vs_early_df
+colnames(orf_thin_vs_early) <- c("baseMean","log2FoldChange","lfcSE","pvalue","padj","locus_tag","significant")
+orf_thin_vs_early <- merge(gene_orf_clean, orf_thin_vs_early, by = "locus_tag")
+
+#Pull significant genes
+sig_genes_thin <- orf_thin_vs_early %>%
+  filter(padj < 0.05 & abs(log2FoldChange) > 1) %>%
+  pull(ORF)
+
+#Separate up and down regulated genes
+up_genes_thin <- orf_thin_vs_early %>%
+  filter(significant == "Up") %>%
+  pull(ORF)
+
+down_genes_thin <- orf_thin_vs_early %>%
+  filter(significant == "Down") %>%
+  pull(ORF)
+
+#Define new gene universe
+gene_universe_thin <- unique(orf_thin_vs_early$ORF)
+
+#GO enrichment
+ego_thin_vs_early <- enrichGO(
+    gene = sig_genes_thin,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_thin,
+    ont = "BP"
+)
+
+#Upregulated Biology
+ego_up <- enrichGO(
+    gene = up_genes_thin,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_thin,
+    ont = "BP"
+)
+
+#Downregulated Biology
+ego_down <- enrichGO(
+    gene = down_genes_thin,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_thin,
+    ont = "BP"
+)
+
+#KEGG Enrichment
+kk_thin_vs_early <- enrichKEGG(
+    gene = sig_genes_thin,
+    organism = "sce",
+    universe = gene_universe_thin
+)
+
+#Plot
+dotplot(ego_thin_vs_early, showCategory = 10) +
+  ggtitle("GO-BP Thin vs Early Enrichment")
+
+dotplot(ego_up, showCategory = 10) +
+  ggtitle("GO-BP Thin vs Early Up-Regulated Gene Enrichment")
+
+dotplot(ego_down, showCategory = 10) +
+  ggtitle("GO-BP Thin vs Early Down-Regulated Gene Enrichment")
+
+dotplot(kk_thin_vs_early, showCategory = 10) +
+  ggtitle("KEGG Thin vs Early Pathway Enrichment")
+
+```
+
+### Mature vs Early Functional enrichment
+
+```{r}
+#Get common yeast ORF names for Mature vs early genes
+orf_mature_vs_early <- res_mature_vs_early_df
+colnames(orf_mature_vs_early) <- c("baseMean","log2FoldChange","lfcSE","pvalue","padj","locus_tag","significant")
+orf_mature_vs_early <- merge(gene_orf_clean, orf_mature_vs_early, by = "locus_tag")
+
+#Pull significant genes
+sig_genes_mature <- orf_mature_vs_early %>%
+  filter(padj < 0.05 & abs(log2FoldChange) > 1) %>%
+  pull(ORF)
+
+#Separate up and down regulated genes
+up_genes_mature <- orf_mature_vs_early %>%
+  filter(significant == "Up") %>%
+  pull(ORF)
+
+down_genes_mature <- orf_mature_vs_early %>%
+  filter(significant == "Down") %>%
+  pull(ORF)
+
+#Define new gene universe
+gene_universe_mature <- unique(orf_mature_vs_early$ORF)
+
+#GO enrichment
+ego_mature_vs_early <- enrichGO(
+    gene = sig_genes_mature,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_mature,
+    ont = "BP"
+)
+
+#Upregulated Biology
+ego_up2 <- enrichGO(
+    gene = up_genes_mature,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_mature,
+    ont = "BP"
+)
+
+#Downregulated Biology
+ego_down2 <- enrichGO(
+    gene = down_genes_mature,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_mature,
+    ont = "BP"
+)
+
+#KEGG Enrichment
+kk_mature_vs_early <- enrichKEGG(
+    gene = sig_genes_mature,
+    organism = "sce",
+    universe = gene_universe_mature
+)
+
+#Plot
+dotplot(ego_mature_vs_early, showCategory = 10) +
+  ggtitle("GO-BP Mature vs Early Enrichment")
+
+dotplot(ego_up2, showCategory = 10) +
+  ggtitle("GO-BP Mature vs Early Up-Regulated Gene Enrichment")
+
+dotplot(ego_down2, showCategory = 10) +
+  ggtitle("GO-BP Mature vs Early Down-Regulated Gene Enrichment")
+
+dotplot(kk_mature_vs_early, showCategory = 10) +
+  ggtitle("KEGG Mature vs Early Pathway Enrichment")
+
+```
+
+### Mature vs Thin Functional enrichment
+
+```{r}
+#Get common yeast ORF names for Mature vs Thin genes
+orf_mature_vs_thin <- res_mature_vs_thin_df
+colnames(orf_mature_vs_thin) <- c("baseMean","log2FoldChange","lfcSE","pvalue","padj","locus_tag","significant")
+orf_mature_vs_thin <- merge(gene_orf_clean, orf_mature_vs_thin, by = "locus_tag")
+
+#Pull significant genes
+sig_genes_mature_thin <- orf_mature_vs_thin %>%
+  filter(padj < 0.05 & abs(log2FoldChange) > 1) %>%
+  pull(ORF)
+
+#Separate up and down regulated genes
+up_genes_mature_thin <- orf_mature_vs_thin %>%
+  filter(significant == "Up") %>%
+  pull(ORF)
+
+down_genes_mature_thin <- orf_mature_vs_thin %>%
+  filter(significant == "Down") %>%
+  pull(ORF)
+
+#Define new gene universe
+gene_universe_mature_thin <- unique(orf_mature_vs_thin$ORF)
+
+#GO enrichment
+ego_mature_vs_thin <- enrichGO(
+    gene = sig_genes_mature_thin,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_mature_thin,
+    ont = "BP"
+)
+
+#Upregulated Biology
+ego_up3 <- enrichGO(
+    gene = up_genes_mature_thin,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_mature_thin,
+    ont = "BP"
+)
+
+#Downregulated Biology
+ego_down3 <- enrichGO(
+    gene = down_genes_mature_thin,
+    OrgDb = org.Sc.sgd.db,
+    keyType = "ORF",
+    universe = gene_universe_mature_thin,
+    ont = "BP"
+)
+
+#KEGG Enrichment
+kk_mature_vs_thin <- enrichKEGG(
+    gene = sig_genes_mature_thin,
+    organism = "sce",
+    universe = gene_universe_mature_thin
+)
+
+#Plot
+dotplot(ego_mature_vs_thin, showCategory = 10) +
+  ggtitle("GO-BP Mature vs Thin Enrichment")
+
+dotplot(ego_up3, showCategory = 10) +
+  ggtitle("GO-BP Mature vs Thin Up-Regulated Gene Enrichment")
+
+dotplot(ego_down3, showCategory = 10) +
+  ggtitle("GO-BP Mature vs Thin Down-Regulated Gene Enrichment")
+
+dotplot(kk_mature_vs_thin, showCategory = 10) +
+  ggtitle("KEGG Mature vs Thin Pathway Enrichment")
+
+```
+
+### Heatmaps with Yeast Common Names 
+
+```{r}
+#Early vs Thin Heatmap
+mat_thin_genes <- rownames(mat_thin)
+annot_thin <- as.data.frame(mat_thin) %>%
+  mutate(locus_tag = mat_thin_genes) %>%
+  left_join(gene_orf_clean, by = "locus_tag")
+
+annot_thin$GENENAME <- coalesce(annot_thin$GENENAME,
+                                  annot_thin$locus_tag)
+
+rownames(annot_thin) <- make.unique(
+  ifelse(annot_thin$GENENAME == annot_thin$locus_tag,
+         annot_thin$locus_tag,  # no gene name → show only locus
+         paste(annot_thin$locus_tag,
+               annot_thin$GENENAME,
+               sep=":"))
+)
+
+#Keep only expression values
+annot_thin <- dplyr::select(annot_thin,-c(locus_tag, GENENAME, protein_id, ORF, SGD))
+annot_mat_thin <- as.matrix(annot_thin)
+
+#Sample annotation
+rownames(sampleTable) <- sampleTable$Run
+annotation_df <- sampleTable[, "stage", drop = FALSE]
+colnames(annotation_df) <- "Biofilm Stage"
+
+#Heatmap
+pheatmap(annot_mat_thin,
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         annotation_col = annotation_df,
+         main = "Differential Gene Expression: Thin vs Early Biofilm",
+         show_rownames = TRUE,
+         show_colnames = FALSE)
+
+
+#Early vs Mature Heatmap
+mat_mature_genes <- rownames(mat_mature)
+annot_mature <- as.data.frame(mat_mature) %>%
+  mutate(locus_tag = mat_mature_genes) %>%
+  left_join(gene_orf_clean, by = "locus_tag")
+
+annot_mature$GENENAME <- coalesce(annot_mature$GENENAME,
+                                  annot_mature$locus_tag)
+
+rownames(annot_mature) <- make.unique(
+  ifelse(annot_mature$GENENAME == annot_mature$locus_tag,
+         annot_mature$locus_tag,  # no gene name → show only locus
+         paste(annot_mature$locus_tag,
+               annot_mature$GENENAME,
+               sep=":"))
+)
+
+#Keep only expression values
+annot_mature <- dplyr::select(annot_mature,-c(locus_tag, GENENAME, protein_id, ORF, SGD))
+annot_mat_mature <- as.matrix(annot_mature)
+
+#Heatmap
+pheatmap(annot_mat_mature,
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         annotation_col = annotation_df,
+         main = "Differential Gene Expression: Mature vs Early Biofilm",
+         show_rownames = TRUE,
+         show_colnames = FALSE)
+
+#Mature vs Thin Heatmap
+mat_mature_thin_genes <- rownames(mat_mature_thin)
+annot_mature_thin <- as.data.frame(mat_mature_thin) %>%
+  mutate(locus_tag = mat_mature_thin_genes) %>%
+  left_join(gene_orf_clean, by = "locus_tag")
+
+annot_mature_thin$GENENAME <- coalesce(annot_mature_thin$GENENAME,
+                                  annot_mature_thin$locus_tag)
+
+rownames(annot_mature_thin) <- make.unique(
+  ifelse(annot_mature_thin$GENENAME == annot_mature_thin$locus_tag,
+         annot_mature_thin$locus_tag,  # no gene name → show only locus
+         paste(annot_mature_thin$locus_tag,
+               annot_mature_thin$GENENAME,
+               sep=":"))
+)
+
+#Keep only expression values
+annot_mature_thin <- dplyr::select(annot_mature_thin,-c(locus_tag, GENENAME, protein_id, ORF, SGD))
+annot_mat_mature_thin <- as.matrix(annot_mature_thin)
+
+#Heatmap
+pheatmap(annot_mat_mature_thin,
+         scale = "row",
+         cluster_rows = TRUE,
+         cluster_cols = TRUE,
+         annotation_col = annotation_df,
+         main = "Differential Gene Expression: Mature vs Thin Biofilm",
+         show_rownames = TRUE,
+         show_colnames = FALSE)
+```

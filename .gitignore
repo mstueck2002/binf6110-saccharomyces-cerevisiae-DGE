@@ -1,0 +1,22 @@
+# Bioinformatics / RNA-seq
+*.fastq
+*.fastq.gz
+*.bam
+*.sam
+*.gz
+*.RData
+*.sqlite
+*.tar
+*.zip
+*.log
+
+# Large data folders
+data/
+kraken2_db/
+kraken_db/
+medaka_out/
+miniforge3/
+Library/
+
+# Mac
+.DS_Store
