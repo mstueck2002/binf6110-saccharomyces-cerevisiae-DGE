@@ -20,3 +20,6 @@ Library/
 
 # Mac
 .DS_Store
+.Rhistory
+.RData
+.RDataTmp*
