@@ -19,6 +19,7 @@ knitr::opts_chunk$set(echo = TRUE)
 ##Install Bioconductor packages
 #BiocManager::install(c("SRAdb","DESeq2","DEGreport","tximport","Biostrings","apeglm","clusterProfiler","KEGGREST","org.Sc.sgd.db","rtracklayer"))
 
+#Load required libraries 
 library(RSQLite)
 library(SRAdb)
 library(fastqcr)
@@ -56,7 +57,7 @@ for (r in sra_accs) {
   system2("prefetch", r)
 }
 
-#Convert locally
+#Convert to files locally
 sra_files <- list.files(
   "/Users/maddystueck/ncbi/public",
   pattern = "\\.sra$",
@@ -86,7 +87,9 @@ for (f in sra_files) {
   )
 }
 
+#List files for sanity check
 list.files("fastq")
+#Remove underscore and number following SRR accession ID
 table(sub("_.*", "", list.files("fastq")))
 ```
 
@@ -139,7 +142,7 @@ sum_stats <- summary(qc)
 #Make output directory 
 mkdir -p salmon_output
 
-#Quantify samples 
+#Quantify samples against salmon index
 for fq in fastq/*.fastq
 do
   sample=$(basename $fq .fastq)
@@ -186,9 +189,11 @@ sampleTable <- data.frame(
 #Import reference fasta
 ref_fasta <- readDNAStringSet("GCA_003046745.1_ASM304674v1_rna_from_genomic.fna.gz")
 
+#Set text IDs and gene IDs from reference fasta
 tx_id <- sub(" .*", "", names(ref_fasta))
 gene_id <- sub(".*locus_tag=([^]]+).*", "\\1", names(ref_fasta))
 
+#Create txt2gene for later count data import
 tx2gene <- data.frame(
   tx = tx_id,
   gene = gene_id,
@@ -205,7 +210,7 @@ salmon_files <- file.path(
 #Name files by sample
 names(salmon_files) <- sampleTable$Run
 
-# import
+#Import count data 
 txi <- tximport(salmon_files, type = "salmon", tx2gene = tx2gene)
 
 ```
@@ -266,16 +271,14 @@ res_thin_vs_earlyLFC <- lfcShrink(dds, coef="stage_Thin_biofilm_vs_Early_biofilm
 #MA plot (shrunk fold changes)
 plotMA(res_thin_vs_earlyLFC, ylim=c(-2,2))
 
-#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot
-#exclude genes with under 2-fold change (log2FoldChange < 1)
+#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot. Axclude genes with under 2-fold change (log2FoldChange < 1)
 res_thin_vs_early_df <- as.data.frame(res_thin_vs_earlyLFC) #shrinkage estimates
 res_thin_vs_early_df$gene <- rownames(res_thin_vs_early_df) #rownames to be genes
 res_thin_vs_early_df$significant <- ifelse(res_thin_vs_early_df$padj < 0.05 & abs(res_thin_vs_early_df$log2FoldChange) > 1, #split by significance 
 ifelse(res_thin_vs_early_df$log2FoldChange > 0, "Up", "Down"), "Not Sig")
 res_thin_vs_early_df <- na.omit(res_thin_vs_early_df) #remove NA values
 
-# Here's some ggplot code for a volcano plot
-# We plot log2foldchange against -log10(adjusted p value)
+#Volcano plot - log2foldchange against -log10(adjusted p value)
 ggplot(res_thin_vs_early_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) + #make plot
 geom_point() +
 scale_color_manual(values = c("Down" = "blue", "Not Sig" = "gray", "Up" = "red")) +
@@ -304,7 +307,7 @@ rownames(sampleTable) <- sampleTable$Run
 annotation_df <- sampleTable[, "stage", drop = FALSE]
 colnames(annotation_df) <- "Biofilm Stage"
 
-#Heatmap
+#Plot Heatmap
 pheatmap(mat_thin,
          scale = "row",
          cluster_rows = TRUE,
@@ -337,16 +340,14 @@ res_mature_vs_earlyLFC <- lfcShrink(dds, coef="stage_Mature_biofilm_vs_Early_bio
 #MA plot (shrunk fold changes)
 plotMA(res_mature_vs_earlyLFC, ylim=c(-2,2))
 
-#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot
-#exclude genes with under 2-fold change (log2FoldChange < 1)
+#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot. Exclude genes with under 2-fold change (log2FoldChange < 1)
 res_mature_vs_early_df <- as.data.frame(res_mature_vs_earlyLFC) #shrinkage estimates
 res_mature_vs_early_df$gene <- rownames(res_mature_vs_early_df) #rownames to be genes
 res_mature_vs_early_df$significant <- ifelse(res_mature_vs_early_df$padj < 0.05 & abs(res_mature_vs_early_df$log2FoldChange) > 1, #split by significance 
 ifelse(res_mature_vs_early_df$log2FoldChange > 0, "Up", "Down"), "Not Sig")
 res_mature_vs_early_df <- na.omit(res_mature_vs_early_df) #remove NA values
 
-# Here's some ggplot code for a volcano plot
-# We plot log2foldchange against -log10(adjusted p value)
+#Volcano plot - log2foldchange against -log10(adjusted p value)
 ggplot(res_mature_vs_early_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) + #make plot
 geom_point() +
 scale_color_manual(values = c("Down" = "blue", "Not Sig" = "gray", "Up" = "red")) +
@@ -376,7 +377,7 @@ rownames(sampleTable) <- sampleTable$Run
 annotation_df <- sampleTable[, "stage", drop = FALSE]
 colnames(annotation_df) <- "Biofilm Stage"
 
-#Heatmap
+#Plot Heatmap
 pheatmap(mat_mature,
          scale = "row",
          cluster_rows = TRUE,
@@ -393,6 +394,7 @@ dds$stage <- relevel(dds$stage, ref = "Thin_biofilm")
 dds <- DESeq(dds)
 resultsNames(dds)
 
+#Extract differential expression results - MATURE vs THIN
 res_mature_vs_thin <- results(dds,name = "stage_Mature_biofilm_vs_Thin_biofilm")
 
 #Filter significant genes
@@ -403,7 +405,7 @@ sum(res_mature_vs_thin$padj < 0.05 &
     abs(res_mature_vs_thin$log2FoldChange) > 1,
     na.rm = TRUE)
 
-##MA plot (raw fold changes)
+#MA plot (raw fold changes)
 plotMA(res_mature_vs_thin, ylim=c(-2,2))
 
 #Shrink log2 fold changes
@@ -412,16 +414,14 @@ res_mature_vs_thinLFC <- lfcShrink(dds, coef = "stage_Mature_biofilm_vs_Thin_bio
 #MA plot (shrunk fold changes)
 plotMA(res_mature_vs_thinLFC, ylim=c(-2,2))
 
-#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot
-#exclude genes with under 2-fold change (log2FoldChange < 1)
+#Mark genes as upregulated, downregulated, or not significant to colour them in ggplot. Exclude genes with under 2-fold change (log2FoldChange < 1)
 res_mature_vs_thin_df <- as.data.frame(res_mature_vs_thinLFC) #shrinkage estimates
 res_mature_vs_thin_df$gene <- rownames(res_mature_vs_thin_df) #rownames to be genes
 res_mature_vs_thin_df$significant <- ifelse(res_mature_vs_thin_df$padj < 0.05 & abs(res_mature_vs_thin_df$log2FoldChange) > 1, #split by significance 
 ifelse(res_mature_vs_thin_df$log2FoldChange > 0, "Up", "Down"), "Not Sig")
 res_mature_vs_thin_df <- na.omit(res_mature_vs_thin_df) #remove NA values
 
-# Here's some ggplot code for a volcano plot
-# We plot log2foldchange against -log10(adjusted p value)
+#Volcano plot - log2foldchange against -log10(adjusted p value)
 ggplot(res_mature_vs_thin_df, aes(x = log2FoldChange, y = -log10(padj), color = significant)) + #make plot
 geom_point() +
 scale_color_manual(values = c("Down" = "blue", "Not Sig" = "gray", "Up" = "red")) +
@@ -451,7 +451,7 @@ rownames(sampleTable) <- sampleTable$Run
 annotation_df <- sampleTable[, "stage", drop = FALSE]
 colnames(annotation_df) <- "Biofilm Stage"
 
-#Heatmap
+#Plot Heatmap
 pheatmap(mat_mature_thin,
          scale = "row",
          cluster_rows = TRUE,
@@ -481,10 +481,11 @@ sig_res_LRT <- res_LRT %>%
 #Get sig gene lists
 sigLRT_genes <- sig_res_LRT %>% 
                 pull(gene)
-                
+
+#Sanity check length of significant lrt genes                
 length(sigLRT_genes)
 
-#Obtain rlog values for significant genes
+#Variance stabilize significant genes
 rld <- vst(dds)
 rld_mat <- assay(rld)
 
@@ -524,6 +525,7 @@ blastp \
 #Import blast mapping for reference genome orthologs
 blast_map <- read.delim("blast_output/yeast_matches.tsv", header = FALSE)
 
+#Set column names of blast_map
 colnames(blast_map) <- c(
   "protein_id", "ORF", "identity",
   "length", "mismatch", "gap",
@@ -562,10 +564,12 @@ gene_map$ORF <- str_extract(
     "(?<=\\|)[A-Z0-9]+(?=_YEAST)"
 )
 
+#Retain only identifiers of interest
 gene_map <- gene_map[c("protein_id","locus_tag","ORF")]
+#Rename ORf as GENENAME
 colnames(gene_map) <- c("protein_id","locus_tag","GENENAME")
 
-#Map gene name ORF to yeast ORF
+#Map gene name ORF from blast to common yeast ORF
 orf_map <- select(
     org.Sc.sgd.db,
     keys = gene_map$GENENAME,
@@ -593,6 +597,7 @@ gene_orf_clean <- gene_orf %>%
 clusters_df <- clusters$df
 colnames(clusters_df) <- c("locus_tag", "cluster")
 
+#Merge clusters data frame with blast annotation data frame
 cluster_orfs <- merge(
     gene_orf_clean,
     clusters_df,
@@ -609,7 +614,6 @@ cluster_orfs <- cluster_orfs %>%
 
 #Define Gene Universe
 gene_universe <- unique(cluster_orfs$ORF)
-
 
 #GO enrichment by cluster
 go_compare <- compareCluster(
@@ -631,7 +635,7 @@ kegg_compare <- compareCluster(
     universe = gene_universe
 )
 
-#Plot
+#Dotplots
 dotplot(go_compare, showCategory = 10) +
   ggtitle("GO-BP Enrichment by Cluster")
 
@@ -698,7 +702,7 @@ kk_thin_vs_early <- enrichKEGG(
     universe = gene_universe_thin
 )
 
-#Plot
+#Dotplots
 dotplot(ego_thin_vs_early, showCategory = 10) +
   ggtitle("GO-BP Thin vs Early Enrichment")
 
@@ -772,7 +776,7 @@ kk_mature_vs_early <- enrichKEGG(
     universe = gene_universe_mature
 )
 
-#Plot
+#Dotplots
 dotplot(ego_mature_vs_early, showCategory = 10) +
   ggtitle("GO-BP Mature vs Early Enrichment")
 
@@ -846,7 +850,7 @@ kk_mature_vs_thin <- enrichKEGG(
     universe = gene_universe_mature_thin
 )
 
-#Plot
+#Dotplots
 dotplot(ego_mature_vs_thin, showCategory = 10) +
   ggtitle("GO-BP Mature vs Thin Enrichment")
 
@@ -865,14 +869,22 @@ dotplot(kk_mature_vs_thin, showCategory = 10) +
 
 ```{r}
 #Early vs Thin Heatmap
+
+#Create new dataframe for annotations of thin vs early DEGs
 mat_thin_genes <- rownames(mat_thin)
+
+#Establish locus tags of matrix thin vs early DEGs
 annot_thin <- as.data.frame(mat_thin) %>%
   mutate(locus_tag = mat_thin_genes) %>%
   left_join(gene_orf_clean, by = "locus_tag")
 
+#If a gene symbol (GENENAME) is missing, fall back to using the locus tag.
 annot_thin$GENENAME <- coalesce(annot_thin$GENENAME,
                                   annot_thin$locus_tag)
 
+#Construct unique row names for heatmap labeling: 
+##If no gene symbol exists, display only the locus tag. 
+##If a gene symbol exists, display "locus_tag:GENENAME".
 rownames(annot_thin) <- make.unique(
   ifelse(annot_thin$GENENAME == annot_thin$locus_tag,
          annot_thin$locus_tag,  # no gene name → show only locus
@@ -881,7 +893,7 @@ rownames(annot_thin) <- make.unique(
                sep=":"))
 )
 
-#Keep only expression values
+#Keep only expression values and columns necessary for heatmap
 annot_thin <- dplyr::select(annot_thin,-c(locus_tag, GENENAME, protein_id, ORF, SGD))
 annot_mat_thin <- as.matrix(annot_thin)
 
@@ -890,7 +902,7 @@ rownames(sampleTable) <- sampleTable$Run
 annotation_df <- sampleTable[, "stage", drop = FALSE]
 colnames(annotation_df) <- "Biofilm Stage"
 
-#Heatmap
+#Plot heatmap
 pheatmap(annot_mat_thin,
          scale = "row",
          cluster_rows = TRUE,
@@ -902,14 +914,21 @@ pheatmap(annot_mat_thin,
 
 
 #Early vs Mature Heatmap
+#Create new dataframe for annotations of mature vs early DEGs
 mat_mature_genes <- rownames(mat_mature)
+
+#Establish locus tags of matrix mature vs early DEGs
 annot_mature <- as.data.frame(mat_mature) %>%
   mutate(locus_tag = mat_mature_genes) %>%
   left_join(gene_orf_clean, by = "locus_tag")
 
+#If a gene symbol (GENENAME) is missing, fall back to using the locus tag.
 annot_mature$GENENAME <- coalesce(annot_mature$GENENAME,
                                   annot_mature$locus_tag)
 
+#Construct unique row names for heatmap labeling: 
+##If no gene symbol exists, display only the locus tag. 
+##If a gene symbol exists, display "locus_tag:GENENAME".
 rownames(annot_mature) <- make.unique(
   ifelse(annot_mature$GENENAME == annot_mature$locus_tag,
          annot_mature$locus_tag,  # no gene name → show only locus
@@ -922,7 +941,7 @@ rownames(annot_mature) <- make.unique(
 annot_mature <- dplyr::select(annot_mature,-c(locus_tag, GENENAME, protein_id, ORF, SGD))
 annot_mat_mature <- as.matrix(annot_mature)
 
-#Heatmap
+#Plot heatmap
 pheatmap(annot_mat_mature,
          scale = "row",
          cluster_rows = TRUE,
@@ -933,14 +952,21 @@ pheatmap(annot_mat_mature,
          show_colnames = FALSE)
 
 #Mature vs Thin Heatmap
+#Create new dataframe for annotations of mature vs thin DEGs
 mat_mature_thin_genes <- rownames(mat_mature_thin)
+
+#Establish locus tags of matrix thin vs early DEGs
 annot_mature_thin <- as.data.frame(mat_mature_thin) %>%
   mutate(locus_tag = mat_mature_thin_genes) %>%
   left_join(gene_orf_clean, by = "locus_tag")
 
+#If a gene symbol (GENENAME) is missing, fall back to using the locus tag.
 annot_mature_thin$GENENAME <- coalesce(annot_mature_thin$GENENAME,
                                   annot_mature_thin$locus_tag)
 
+#Construct unique row names for heatmap labeling: 
+##If no gene symbol exists, display only the locus tag. 
+##If a gene symbol exists, display "locus_tag:GENENAME".
 rownames(annot_mature_thin) <- make.unique(
   ifelse(annot_mature_thin$GENENAME == annot_mature_thin$locus_tag,
          annot_mature_thin$locus_tag,  # no gene name → show only locus
@@ -953,7 +979,7 @@ rownames(annot_mature_thin) <- make.unique(
 annot_mature_thin <- dplyr::select(annot_mature_thin,-c(locus_tag, GENENAME, protein_id, ORF, SGD))
 annot_mat_mature_thin <- as.matrix(annot_mature_thin)
 
-#Heatmap
+#Plot heatmap
 pheatmap(annot_mat_mature_thin,
          scale = "row",
          cluster_rows = TRUE,
