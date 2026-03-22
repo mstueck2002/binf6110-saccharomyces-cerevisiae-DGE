@@ -203,7 +203,7 @@ Overall, these findings advance understanding of flor yeast physiology by defini
 
 Despite these strengths, certain methodological constraints should be considered when interpreting the results. Functional enrichment analyses were limited to strain I-329 locus tags that could be mapped via BLASTP to putative orthologs in the reference strain S288C, potentially excluding strain-specific genes and biological functions. Reliance on existing GO and KEGG annotations further restricts interpretation, particularly for poorly characterized genes, and no experimental validation was performed to confirm inferred gene functions. Future studies could employ targeted mutagenesis or gene knockout approaches in strain I-329 to validate the roles of key genes identified here. Expanded bioinformatic annotation of protein-coding genes may also improve resolution of strain-specific adaptations. Finally, integrating transcriptomic analyses with chemical profiling of wine aging processes could clarify how modulation of fermentation conditions influences metabolite composition and ultimately shapes the sensory properties and phenotypes of sherry wines.
 
-## Works Cited
+## References
 
 1. Avdanina, D., & Zghun, A. (2022). Sherry Wines: Worldwide Production, Chemical Composition and Screening Conception for Flor Yeasts. Fermentation, 8(8), 381. https://doi.org/10.3390/fermentation8080381
 2. Cruces-Montes, S. J., Merchán-Clavellino, A., Romero-Moreno, A., & Paramio, A. (2020). Perception of the Attributes of Sherry Wine and Its Consumption in Young People in the South of Spain. Foods (Basel, Switzerland), 9(4), 417. https://doi.org/10.3390/foods9040417
